@@ -9,10 +9,10 @@ from rclpy.node import Node
 from rclpy.task import Future
 
 # ROS messages
-from std_msgs.msg import Header
-from geometry_msgs.msg import Vector3, Transform
+from std_msgs.msg import Header, Int64
+from geometry_msgs.msg import Vector3, Transform, Point
 from sensor_msgs.msg import PointCloud2, PointField
-from gpd_ros2_msgs.srv import DetectGrasps
+from gpd_ros2_msgs.srv import DetectConstrainedGrasps
 from gpd_ros2_msgs.msg import CloudIndexed, CloudSources, GraspParams
 
 try:
@@ -51,6 +51,11 @@ def _vector3(xyz: Iterable[float]) -> Vector3:
   v = Vector3()
   v.x, v.y, v.z = [float(x) for x in xyz]
   return v
+
+def _point(xyz: Iterable[float]) -> Point:
+  p = Point()
+  p.x, p.y, p.z = [float(x) for x in xyz]
+  return p
 
 def _transform_from_rt(translation_xyz: Iterable[float], quat_xyzw: Iterable[float]) -> Transform:
   t = Transform()
@@ -102,9 +107,9 @@ def decide_approach_direction(object_xyz: np.ndarray,
 class GpdConstrainedClient(Node):
   def __init__(self):
     super().__init__("gpd_constrained_client")
-    self.cli = self.create_client(DetectGrasps, "detect_grasps")
+    self.cli = self.create_client(DetectConstrainedGrasps, "detect_constrained_grasps")
     if not self.cli.wait_for_service(timeout_sec=2.0):
-      self.get_logger().warn("detect_grasps service not immediately available. Will still try to call.")
+      self.get_logger().warn("detect_constrained_grasps service not immediately available. Will still try to call.")
 
   def call_with_pcds(
       self,
@@ -118,7 +123,7 @@ class GpdConstrainedClient(Node):
       workspace_margin: float = 0.02,
       enable_approach_filter: bool = True,
       stretch_max_lift_z: float = 1.1,
-  ) -> DetectGrasps.Response:
+  ) -> DetectConstrainedGrasps.Response:
 
     obj_xyz = _to_numpy_xyz(pcd_obj)
     env_xyz = _to_numpy_xyz(pcd_env)
@@ -135,10 +140,13 @@ class GpdConstrainedClient(Node):
 
     sources = CloudSources()
     sources.cloud = cloud_msg
+    for (cx, cy, cz) in cam_positions:
+        sources.view_points.append(_point((cx, cy, cz)))
+    sources.camera_source = [Int64(data=0)] * full_xyz.shape[0]
 
     cloud_indexed = CloudIndexed()
     cloud_indexed.cloud_sources = sources
-    cloud_indexed.indices = obj_indices
+    cloud_indexed.indices = [Int64(data=int(i)) for i in obj_indices]
 
     mins, maxs = _pcd_bounds(env_xyz if env_xyz.size else full_xyz)
     workspace = _pad_workspace(mins, maxs, workspace_margin)
@@ -157,23 +165,110 @@ class GpdConstrainedClient(Node):
     gp.enable_approach_dir_filtering = bool(enable_approach_filter)
     gp.approach_dir_threshold = float(approach_threshold_deg)
 
-    req = DetectGrasps.Request()
+    req = DetectConstrainedGrasps.Request()
     req.cloud_indexed = cloud_indexed
     req.grasp_params = gp
     req.params_policy = params_policy
 
     future: Future = self.cli.call_async(req)
-    rclpy.spin_until_future_complete(self, future, timeout_sec=15.0)
+    rclpy.spin_until_future_complete(self, future, timeout_sec=120.0)
     if not future.done() or future.result() is None:
-      raise RuntimeError("detect_grasps call failed or timed out")
+      raise RuntimeError("detect_constrained_grasps call failed or timed out")
     return future.result()
+
+def visualize_input_pcds(pcd_obj, pcd_env):
+    if not _HAS_O3D:
+        print("Open3D not available. Skipping visualization.")
+        return
+
+    print("Visualizing pcd_obj and pcd_env with Open3D...")
+    pcd_env_o3d = o3d.geometry.PointCloud()
+    pcd_env_o3d.points = o3d.utility.Vector3dVector(_to_numpy_xyz(pcd_env))
+    pcd_env_o3d.paint_uniform_color([0.5, 0.5, 0.5]) # Gray for environment
+
+    pcd_obj_o3d = o3d.geometry.PointCloud()
+    pcd_obj_o3d.points = o3d.utility.Vector3dVector(_to_numpy_xyz(pcd_obj))
+    pcd_obj_o3d.paint_uniform_color([1.0, 0.0, 0.0]) # Red for object
+    
+    # Add a coordinate frame for reference
+    coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1, origin=[0, 0, 0])
+
+    o3d.visualization.draw_geometries([pcd_env_o3d, pcd_obj_o3d, coord_frame], 
+                                      window_name="GPD Client Input", 
+                                      width=1024, height=768)
+
+def visualize_grasps(pcd_obj, pcd_env, grasps, max_grasps=10):
+    if not _HAS_O3D:
+        print("Open3D not available. Skipping grasp visualization.")
+        return
+    
+    geoms = []
+    
+    # Environment point cloud (Gray)
+    pcd_env_o3d = o3d.geometry.PointCloud()
+    pcd_env_o3d.points = o3d.utility.Vector3dVector(_to_numpy_xyz(pcd_env))
+    pcd_env_o3d.paint_uniform_color([0.5, 0.5, 0.5])
+    geoms.append(pcd_env_o3d)
+    
+    # Object point cloud (Red)
+    pcd_obj_o3d = o3d.geometry.PointCloud()
+    pcd_obj_o3d.points = o3d.utility.Vector3dVector(_to_numpy_xyz(pcd_obj))
+    pcd_obj_o3d.paint_uniform_color([1.0, 0.0, 0.0])
+    geoms.append(pcd_obj_o3d)
+    
+    # Coordinate system at origin
+    geoms.append(o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1))
+    
+    # Gripper dimensions (matching GPD defaults)
+    hand_depth = 0.06
+    hand_outer_diameter = 0.12
+    finger_width = 0.01
+    hand_height = 0.02
+    
+    print(f"Adding {min(len(grasps), max_grasps)} grasps to the scene...")
+    for i, g in enumerate(grasps[:max_grasps]):
+        # Construct 4x4 matrix from GPD GraspConfig
+        T = np.eye(4)
+        T[0:3, 0] = [g.approach.x, g.approach.y, g.approach.z]
+        T[0:3, 1] = [g.binormal.x, g.binormal.y, g.binormal.z]
+        T[0:3, 2] = [g.axis.x, g.axis.y, g.axis.z]
+        T[0:3, 3] = [g.position.x, g.position.y, g.position.z]
+        
+        # Palm
+        palm = o3d.geometry.TriangleMesh.create_box(width=hand_depth, height=hand_outer_diameter, depth=hand_height)
+        palm.translate([-hand_depth, -hand_outer_diameter/2, -hand_height/2])
+        
+        # Use detected width for finger spacing
+        w = g.width.data
+        
+        # Finger 1
+        f1 = o3d.geometry.TriangleMesh.create_box(width=hand_depth, height=finger_width, depth=hand_height)
+        f1.translate([0, w/2, -hand_height/2])
+        
+        # Finger 2
+        f2 = o3d.geometry.TriangleMesh.create_box(width=hand_depth, height=finger_width, depth=hand_height)
+        f2.translate([0, -w/2 - finger_width, -hand_height/2])
+        
+        gripper = palm + f1 + f2
+        gripper.transform(T)
+        
+        # Color based on score (Green for positive, Red for negative)
+        color = [0.1, 0.8, 0.1] if g.score.data > 0 else [0.8, 0.1, 0.1]
+        gripper.paint_uniform_color(color)
+        geoms.append(gripper)
+        
+    o3d.visualization.draw_geometries(geoms, window_name="GPD Grasps Visualization", 
+                                      width=1024, height=768)
 
 def main():
   rclpy.init()
   node = GpdConstrainedClient()
   # Example synthetic clouds
   env = np.random.uniform([-0.3,-0.3,0.65],[0.3,0.3,0.8], size=(5000,3)).astype(np.float32)
-  obj = np.random.uniform([-0.05,-0.05,0.7],[0.05,0.05,0.75], size=(800,3)).astype(np.float32)
+  obj = np.random.uniform([-0.05,-0.05,0.8],[0.05,0.05,0.85], size=(800,3)).astype(np.float32)
+
+  visualize_input_pcds(obj, env)
+
   frame_id = "base_link"
   cam_positions = [(0.5, 0.0, 1.2)]
   cam_to_base = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
@@ -181,11 +276,17 @@ def main():
     res = node.call_with_pcds(
       pcd_obj=obj, pcd_env=env, frame_id=frame_id,
       cam_positions=cam_positions, cam_to_base=cam_to_base,
-      params_policy=DetectGrasps.Request.USE_REQUEST_PARAMS,
+      params_policy=DetectConstrainedGrasps.Request.USE_CFG_FILE,
       approach_threshold_deg=25.0, workspace_margin=0.01,
       enable_approach_filter=True, stretch_max_lift_z=1.1,
     )
     node.get_logger().info(f"Got {len(res.grasp_configs.grasps)} grasps")
+    
+    if len(res.grasp_configs.grasps) > 0:
+        visualize_grasps(obj, env, res.grasp_configs.grasps)
+    else:
+        print("No grasps to visualize.")
+
   except Exception as e:
     node.get_logger().error(f"Service call failed: {e}")
   finally:

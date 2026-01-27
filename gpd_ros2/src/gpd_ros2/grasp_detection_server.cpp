@@ -12,8 +12,8 @@ GraspDetectionServer::GraspDetectionServer(const rclcpp::NodeOptions &options)
   : rclcpp::Node("grasp_detection_server", options)
 {
   declare_parameter<std::vector<double>>("camera_position", {0.0, 0.0, 0.0});
-  declare_parameter<std::string>("config_file", std::string("/home/ws/ros2_ws/install/gpd_ros2/share/gpd_ros2/cfg/cfg/ros_eigen_params.cfg"));
-  declare_parameter<std::string>("rviz_topic", std::string("/grasps_rviz"));
+  declare_parameter<std::string>("config_file", std::string("/home/kreis/ws/install/gpd_ros2/share/gpd_ros2/cfg/ros_eigen_params.cfg"));
+  declare_parameter<std::string>("rviz_topic", std::string(""));
   declare_parameter<std::vector<double>>("workspace", {-10.0, -10.0, -10.0, 10.0, 10.0, 10.0});
 
   auto camera_position = get_parameter("camera_position").as_double_array();
@@ -79,6 +79,13 @@ void GraspDetectionServer::handleRequest(const Request req, Response res)
   {
     view_points.col(i) << cloud_sources.view_points[i].x, cloud_sources.view_points[i].y, cloud_sources.view_points[i].z;
   }
+  
+  if (view_points.cols() == 0) {
+    RCLCPP_WARN(get_logger(), "No view points received. Using default (0,0,0).");
+    view_points.resize(3, 1);
+    view_points.setZero();
+  }
+
   RCLCPP_INFO(get_logger(), "Added viewpoints ...");
   cloud_camera_header_ = cloud_sources.cloud.header;
   frame_ = cloud_camera_header_.frame_id;
@@ -89,8 +96,15 @@ void GraspDetectionServer::handleRequest(const Request req, Response res)
     pcl::fromROSMsg(cloud_sources.cloud, *cloud);
 
     Eigen::MatrixXi camera_source = Eigen::MatrixXi::Zero(view_points.cols(), cloud->size());
-    for (size_t i = 0; i < cloud_sources.camera_source.size(); ++i)
-      camera_source(cloud_sources.camera_source[i].data, static_cast<int>(i)) = 1;
+    for (size_t i = 0; i < cloud_sources.camera_source.size(); ++i) {
+      int cam_idx = cloud_sources.camera_source[i].data;
+      if (cam_idx >= 0 && cam_idx < view_points.cols()) {
+         camera_source(cam_idx, static_cast<int>(i)) = 1;
+      } else {
+         // Log once or sparely to avoid flooding
+         if (i == 0) RCLCPP_WARN(get_logger(), "Invalid camera source index %d (max %ld). Skipping assignment.", cam_idx, view_points.cols()-1);
+      }
+    }
 
     RCLCPP_INFO(get_logger(), "Added camera sources ...");
     cloud_camera_ = std::make_unique<gpd::util::Cloud>(cloud, camera_source, view_points);
@@ -103,8 +117,14 @@ void GraspDetectionServer::handleRequest(const Request req, Response res)
     pcl::fromROSMsg(cloud_sources.cloud, *cloud);
 
     Eigen::MatrixXi camera_source = Eigen::MatrixXi::Zero(view_points.cols(), cloud->size());
-    for (size_t i = 0; i < cloud_sources.camera_source.size(); ++i)
-      camera_source(cloud_sources.camera_source[i].data, static_cast<int>(i)) = 1;
+    for (size_t i = 0; i < cloud_sources.camera_source.size(); ++i) {
+      int cam_idx = cloud_sources.camera_source[i].data;
+      if (cam_idx >= 0 && cam_idx < view_points.cols()) {
+         camera_source(cam_idx, static_cast<int>(i)) = 1;
+      } else {
+         if (i == 0) RCLCPP_WARN(get_logger(), "Invalid camera source index %d (max %ld). Skipping assignment.", cam_idx, view_points.cols()-1);
+      }
+    }
 
     cloud_camera_ = std::make_unique<gpd::util::Cloud>(cloud, camera_source, view_points);
     std::cout << "view_points:\n" << view_points << "\n";
