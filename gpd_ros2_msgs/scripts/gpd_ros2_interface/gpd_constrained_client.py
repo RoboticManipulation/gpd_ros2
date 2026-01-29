@@ -176,28 +176,35 @@ class GpdConstrainedClient(Node):
       raise RuntimeError("detect_constrained_grasps call failed or timed out")
     return future.result()
 
-def visualize_input_pcds(pcd_obj, pcd_env):
+def visualize_input_pcds(pcd_obj=None, pcd_env=None):
     if not _HAS_O3D:
         print("Open3D not available. Skipping visualization.")
         return
 
-    print("Visualizing pcd_obj and pcd_env with Open3D...")
-    pcd_env_o3d = o3d.geometry.PointCloud()
-    pcd_env_o3d.points = o3d.utility.Vector3dVector(_to_numpy_xyz(pcd_env))
-    pcd_env_o3d.paint_uniform_color([0.5, 0.5, 0.5]) # Gray for environment
+    geometry_list = []
 
-    pcd_obj_o3d = o3d.geometry.PointCloud()
-    pcd_obj_o3d.points = o3d.utility.Vector3dVector(_to_numpy_xyz(pcd_obj))
-    pcd_obj_o3d.paint_uniform_color([1.0, 0.0, 0.0]) # Red for object
+    if pcd_env is not None:
+      print("Visualizing pcd_obj and pcd_env with Open3D...")
+      pcd_env_o3d = o3d.geometry.PointCloud()
+      pcd_env_o3d.points = o3d.utility.Vector3dVector(_to_numpy_xyz(pcd_env))
+      pcd_env_o3d.paint_uniform_color([0.5, 0.5, 0.5]) # Gray for environment
+      geometry_list.append(pcd_env_o3d)
+
+    if pcd_obj is not None:
+      pcd_obj_o3d = o3d.geometry.PointCloud()
+      pcd_obj_o3d.points = o3d.utility.Vector3dVector(_to_numpy_xyz(pcd_obj))
+      pcd_obj_o3d.paint_uniform_color([1.0, 0.0, 0.0]) # Red for object
+      geometry_list.append(pcd_obj_o3d)
     
     # Add a coordinate frame for reference
     coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1, origin=[0, 0, 0])
-
-    o3d.visualization.draw_geometries([pcd_env_o3d, pcd_obj_o3d, coord_frame], 
+    
+    geometry_list.append(coord_frame)
+    o3d.visualization.draw_geometries(geometry_list, 
                                       window_name="GPD Client Input", 
                                       width=1024, height=768)
 
-def visualize_grasps(pcd_obj, pcd_env, grasps, max_grasps=10):
+def visualize_grasps(pcd_obj=None, pcd_env=None, grasps=[], max_grasps=10):
     if not _HAS_O3D:
         print("Open3D not available. Skipping grasp visualization.")
         return
@@ -205,16 +212,18 @@ def visualize_grasps(pcd_obj, pcd_env, grasps, max_grasps=10):
     geoms = []
     
     # Environment point cloud (Gray)
-    pcd_env_o3d = o3d.geometry.PointCloud()
-    pcd_env_o3d.points = o3d.utility.Vector3dVector(_to_numpy_xyz(pcd_env))
-    pcd_env_o3d.paint_uniform_color([0.5, 0.5, 0.5])
-    geoms.append(pcd_env_o3d)
+    if pcd_env is not None:
+      pcd_env_o3d = o3d.geometry.PointCloud()
+      pcd_env_o3d.points = o3d.utility.Vector3dVector(_to_numpy_xyz(pcd_env))
+      pcd_env_o3d.paint_uniform_color([0.5, 0.5, 0.5])
+      geoms.append(pcd_env_o3d)
     
     # Object point cloud (Red)
-    pcd_obj_o3d = o3d.geometry.PointCloud()
-    pcd_obj_o3d.points = o3d.utility.Vector3dVector(_to_numpy_xyz(pcd_obj))
-    pcd_obj_o3d.paint_uniform_color([1.0, 0.0, 0.0])
-    geoms.append(pcd_obj_o3d)
+    if pcd_obj is not None:
+      pcd_obj_o3d = o3d.geometry.PointCloud()
+      pcd_obj_o3d.points = o3d.utility.Vector3dVector(_to_numpy_xyz(pcd_obj))
+      pcd_obj_o3d.paint_uniform_color([1.0, 0.0, 0.0])
+      geoms.append(pcd_obj_o3d)
     
     # Coordinate system at origin
     geoms.append(o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1))
